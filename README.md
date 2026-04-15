@@ -1,24 +1,66 @@
 # Private Root CA
 
-> Offline, standalone Public Key Infrastructure (PKI) management for home labs.
+> Offline, standalone Public Key Infrastructure (PKI) management for home labs inside a FIPS-compliant, self-contained Docker ecosystem.
 
-This repository provides scripts to initialize a self-contained Root CA, sign intermediate CAs, and generate/sign standalone offline leaf certificates. 
+This repository provides scripts packaged within a Red Hat UBI minimal container to initialize a self-contained Root CA, sign intermediate CAs, and generate/sign standalone offline leaf certificates. 
 
-It uses a pre-built Docker image (`private-root-ca:latest` — Alpine + OpenSSL) to generate key material securely, but will fall back to local `openssl` if Docker is unavailable.
+The container enforces FIPS-compliant algorithms (via `openssl`) and strictly contains all execution within the Docker environment, interacting with the host exclusively via volume mounts.
+
+It is built for multi-arch execution (e.g., AMD64 and ARM64/Raspberry Pi) leveraging the official multi-architecture `ubi-minimal` base images.
+
+---
+
+## Architecture & Configuration
+
+All execution happens exclusively in the container. The scripts (`root-ca` and `gen-csr`) evaluate operations in the container's `/ca/output/` directory, which routes to a volume on the host. An optional explicit root key can be mounted at `/key/root_ca.key`.
+
+### Running the Container
+
+The container provides two modes of operation: **Long-Running/Background** and **Transient**.
+
+#### Option 1: Long-Running (docker-compose)
+
+This mounts your directories and starts a sleeping container in the background.
+
+```bash
+docker-compose up -d
+```
+
+You can then run commands inside the container whenever you need to mint certificates:
+
+```bash
+# As standard root in container
+docker exec -it private-root-ca root-ca init
+
+# As a specific host user (so the generated files sync host permissions perfectly)
+docker exec -it --user "1000:1000" private-root-ca root-ca init
+```
+
+#### Option 2: Transient Execution (docker run)
+
+Spin up the container instantly, run one command, and tear down:
+
+```bash
+docker run --rm -it \
+  --user "$(id -u):$(id -g)" \
+  -v "$(pwd)/output:/ca/output" \
+  private-root-ca:latest root-ca init
+```
 
 ---
 
 ## 1. Initialize the PKI
 
-The root CA and intermediate CA must be generated **offline**. 
+The root CA and intermediate CA must be generated **offline**. Utilizing either the transient or background execution above:
 
 ```bash
-./root-ca.sh init
+# Using an existing compose setup
+docker exec -it private-root-ca root-ca init
 ```
 
-Identity fields are read from `pki-vars.yaml`; any missing fields are collected interactively. The intermediate CA key type, key param, and digest are **always prompted** (current values shown as defaults) so the algorithm is confirmed explicitly on every run.
+Identity fields are read from `pki-vars.yaml` inside the container (`/ca/pki-vars.yaml` if mounted, or `/etc/pki/pki-vars.yaml` by default). Any missing fields are collected interactively. The intermediate CA key type, key param, and digest are **always prompted**.
 
-This writes four files to `./output/` (gitignored):
+This writes four files to the `/ca/output/` volume (which appears on your host):
 
 | File | Purpose |
 |------|---------|
@@ -27,38 +69,32 @@ This writes four files to `./output/` (gitignored):
 | `intermediate_ca.key` | Intermediate CA private key |
 | `intermediate_ca.crt` | Intermediate CA certificate |
 
-**Key generation options** — CLI flags override `pki-vars.yaml` settings:
+**Key generation options:**
 
 ```bash
-./root-ca.sh init --key-type ec --key-param P-384   # use EC P-384 instead of RSA 4096
-./root-ca.sh init --key /path/to/existing.key       # bring your own root CA key
-./root-ca.sh init --ca-name "Acme Lab CA" --country US --org "Acme" --outpath /tmp/pki
+docker exec -it private-root-ca root-ca init --key-type ec --key-param P-384
 ```
+
+*Note: If you have an external root key you want to supply, mount it to `/key/root_ca.key` and it will securely adopt it.*
 
 After `init`, verify the chain:
 
 ```bash
-./root-ca.sh verify
+docker exec -it private-root-ca root-ca verify
 ```
 
 ---
 
 ## 2. Generate Standalone Leaf Certificates
 
-While the `intermediate_ca` is typically supplied to an automated provisioner (like Step-CA), you can use these scripts to manually generate and sign standalone certificates locally.
+While the `intermediate_ca` is typically supplied to an automated provisioner (like Step-CA), you can manually generate and sign standalone certificates using `gen-csr`.
 
 ```bash
-# 1. Generate a leaf key + CSR (prompted interactively for missing fields)
-./gen-csr.sh --cn myservice.home --san "DNS:myservice.home,IP:10.0.1.5"
-# → output/myservice.home.key
-# → output/myservice.home.csr
+# 1. Generate a leaf key + CSR
+docker exec -it private-root-ca gen-csr --cn myservice.home --san "DNS:myservice.home,IP:10.0.1.5"
 
 # 2. Sign the CSR with the root CA
-./root-ca.sh --sign-certs output/myservice.home.csr
-# → myservice.home.crt  (written to script directory by default)
-
-# Write the signed cert to a specific location
-./root-ca.sh --sign-certs myservice.home.csr --outpath /srv/certs/
+docker exec -it private-root-ca root-ca --sign-certs /ca/output/myservice.home.csr
 ```
 
-Both scripts display a **pre-issuance confirmation review** — a summary of all resolved settings — before generating any key material. The prompt accepts `Y` (proceed), `n` (abort), or `edit` (re-enter individual fields interactively).
+*Certs and keys are output directly to `/ca/output/` on the container, syncing instantly to your host volume mount without altering file permissions recursively across the whole system, securely preserving ownership to the running `--user`.*

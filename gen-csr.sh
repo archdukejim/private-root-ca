@@ -27,10 +27,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUT_DIR="${SCRIPT_DIR}/output"
-PKI_VARS="${SCRIPT_DIR}/pki-vars.yaml"
-DOCKER_IMAGE="private-root-ca:latest"
-DOCKERFILE="${SCRIPT_DIR}/Dockerfile"
+OUT_DIR="/ca/output"
+PKI_VARS="/ca/pki-vars.yaml"
+[ -f "$PKI_VARS" ] || PKI_VARS="/etc/pki/pki-vars.yaml"
 
 # -----------------------------------------------------------------------
 # Colours
@@ -55,7 +54,6 @@ FLAG_KEY_PARAM=""
 FLAG_DIGEST=""
 FLAG_ROOT_CERT=""
 FLAG_OUTPATH=""
-USE_DOCKER=true
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -67,7 +65,6 @@ while [[ $# -gt 0 ]]; do
         --digest)      FLAG_DIGEST="$2"; shift 2 ;;
         --root-cert)   FLAG_ROOT_CERT="$2"; shift 2 ;;
         --outpath)     FLAG_OUTPATH="$2"; shift 2 ;;
-        --no-docker)   USE_DOCKER=false; shift ;;
         --help|-h)     sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
         *) die "Unknown argument: $1" ;;
     esac
@@ -178,8 +175,7 @@ _show_csr_summary() {
     echo    "    Key source:    ${_key_src}"
     echo ""
     echo -e "  ${BOLD}Output${NC}"
-    echo    "    Directory:     ${OUT_DIR}"
-    $USE_DOCKER && echo "    Docker image:  ${DOCKER_IMAGE}"
+    echo "    Directory:     ${OUT_DIR}"
     echo ""
     echo -e "  ${BOLD}────────────────────────────────────────────────────────────────${NC}"
 }
@@ -238,34 +234,6 @@ _recollect_csr() {
 }
 
 # -----------------------------------------------------------------------
-# Docker image management
-# -----------------------------------------------------------------------
-_ensure_docker_image() {
-    command -v docker >/dev/null 2>&1 || {
-        warn "Docker not found — falling back to local openssl"
-        USE_DOCKER=false
-        return
-    }
-    docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1 && return
-    [ -f "$DOCKERFILE" ] || die "Dockerfile not found: ${DOCKERFILE}"
-    info "Building Docker image ${DOCKER_IMAGE}..."
-    docker build -t "$DOCKER_IMAGE" "$SCRIPT_DIR" \
-        || die "Docker build failed. Check: ${DOCKERFILE}"
-    ok "Docker image built: ${DOCKER_IMAGE}"
-}
-
-# -----------------------------------------------------------------------
-# Docker run helper — mounts OUT_DIR as /pki/output
-# -----------------------------------------------------------------------
-_docker_openssl() {
-    docker run --rm \
-        --user "$(id -u):$(id -g)" \
-        -v "${OUT_DIR}:/pki/output" \
-        "$DOCKER_IMAGE" \
-        openssl "$@"
-}
-
-# -----------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------
 echo ""
@@ -305,8 +273,7 @@ leaf_csr="${OUT_DIR}/${CN_SAFE}.csr"
 
 echo ""
 
-$USE_DOCKER && _ensure_docker_image
-! $USE_DOCKER && { command -v openssl >/dev/null 2>&1 || die "openssl not found in PATH"; }
+command -v openssl >/dev/null 2>&1 || die "openssl not found in PATH"
 
 mkdir -p "$OUT_DIR"
 
@@ -320,43 +287,23 @@ elif [ -f "$leaf_key" ]; then
     ok "Key already exists — reusing: ${leaf_key}"
 else
     info "Generating leaf private key (${KEY_TYPE} ${KEY_PARAM})..."
-    if $USE_DOCKER; then
-        case "${KEY_TYPE,,}" in
-            rsa)
-                _docker_openssl genpkey \
-                    -algorithm RSA \
-                    -pkeyopt "rsa_keygen_bits:${KEY_PARAM}" \
-                    -out "/pki/output/${CN_SAFE}.key" 2>/dev/null ;;
-            ec)
-                _docker_openssl genpkey \
-                    -algorithm EC \
-                    -pkeyopt "ec_paramgen_curve:${KEY_PARAM}" \
-                    -out "/pki/output/${CN_SAFE}.key" 2>/dev/null ;;
-            ed25519)
-                _docker_openssl genpkey \
-                    -algorithm ed25519 \
-                    -out "/pki/output/${CN_SAFE}.key" 2>/dev/null ;;
-            *) die "Unknown key type: ${KEY_TYPE}" ;;
-        esac
-    else
-        case "${KEY_TYPE,,}" in
-            rsa)
-                openssl genpkey \
-                    -algorithm RSA \
-                    -pkeyopt "rsa_keygen_bits:${KEY_PARAM}" \
-                    -out "$leaf_key" 2>/dev/null ;;
-            ec)
-                openssl genpkey \
-                    -algorithm EC \
-                    -pkeyopt "ec_paramgen_curve:${KEY_PARAM}" \
-                    -out "$leaf_key" 2>/dev/null ;;
-            ed25519)
-                openssl genpkey \
-                    -algorithm ed25519 \
-                    -out "$leaf_key" 2>/dev/null ;;
-            *) die "Unknown key type: ${KEY_TYPE}" ;;
-        esac
-    fi
+    case "${KEY_TYPE,,}" in
+        rsa)
+            openssl genpkey \
+                -algorithm RSA \
+                -pkeyopt "rsa_keygen_bits:${KEY_PARAM}" \
+                -out "$leaf_key" 2>/dev/null ;;
+        ec)
+            openssl genpkey \
+                -algorithm EC \
+                -pkeyopt "ec_paramgen_curve:${KEY_PARAM}" \
+                -out "$leaf_key" 2>/dev/null ;;
+        ed25519)
+            openssl genpkey \
+                -algorithm ed25519 \
+                -out "$leaf_key" 2>/dev/null ;;
+        *) die "Unknown key type: ${KEY_TYPE}" ;;
+    esac
     chmod 600 "$leaf_key"
     ok "Leaf key generated: ${leaf_key}"
 fi
@@ -398,23 +345,13 @@ fi
 
 info "Generating CSR for: ${CN}..."
 
-if $USE_DOCKER; then
-    _docker_openssl req -new \
-        -key "/pki/output/${CN_SAFE}.key" \
-        -out "/pki/output/${CN_SAFE}.csr" \
-        -"${DIGEST}" \
-        -config "/pki/output/_csr_${CN_SAFE}.cnf" \
-        2>/dev/null \
-    || { rm -f "$local_cnf"; die "CSR generation failed"; }
-else
-    openssl req -new \
-        -key "$leaf_key" \
-        -out "$leaf_csr" \
-        -"${DIGEST}" \
-        -config "$local_cnf" \
-        2>/dev/null \
-    || { rm -f "$local_cnf"; die "CSR generation failed"; }
-fi
+openssl req -new \
+    -key "$leaf_key" \
+    -out "$leaf_csr" \
+    -"${DIGEST}" \
+    -config "$local_cnf" \
+    2>/dev/null \
+|| { rm -f "$local_cnf"; die "CSR generation failed"; }
 
 rm -f "$local_cnf"
 ok "CSR generated: ${leaf_csr}"
@@ -424,21 +361,9 @@ if [ -n "$FLAG_ROOT_CERT" ]; then
     if [ -f "$FLAG_ROOT_CERT" ]; then
         echo ""
         info "Root CA context (${FLAG_ROOT_CERT}):"
-        local root_dir; root_dir="$(dirname "$(realpath "$FLAG_ROOT_CERT")")"
-        local root_file; root_file="$(basename "$FLAG_ROOT_CERT")"
-        if $USE_DOCKER; then
-            docker run --rm \
-                --user "$(id -u):$(id -g)" \
-                -v "${root_dir}:/pki/ca:ro" \
-                "$DOCKER_IMAGE" \
-                openssl x509 -in "/pki/ca/${root_file}" -noout \
-                    -subject -issuer -fingerprint -sha256 2>/dev/null \
-            | sed 's/^/    /' || true
-        else
-            openssl x509 -in "$FLAG_ROOT_CERT" -noout \
-                -subject -issuer -fingerprint -sha256 2>/dev/null \
-            | sed 's/^/    /' || true
-        fi
+        openssl x509 -in "$FLAG_ROOT_CERT" -noout \
+            -subject -issuer -fingerprint -sha256 2>/dev/null \
+        | sed 's/^/    /' || true
     else
         warn "Root cert not found: ${FLAG_ROOT_CERT}"
     fi

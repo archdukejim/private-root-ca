@@ -36,10 +36,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUT_DIR="${SCRIPT_DIR}/output"
-PKI_VARS="${SCRIPT_DIR}/pki-vars.yaml"
-DOCKER_IMAGE="private-root-ca:latest"
-DOCKERFILE="${SCRIPT_DIR}/Dockerfile"
+OUT_DIR="/ca/output"
+PKI_VARS="/ca/pki-vars.yaml"
+[ -f "$PKI_VARS" ] || PKI_VARS="/etc/pki/pki-vars.yaml"
 
 # -----------------------------------------------------------------------
 # Colours
@@ -58,7 +57,6 @@ die()   { err "$*"; exit 1; }
 # -----------------------------------------------------------------------
 MODE="help"
 SIGN_CSR=""
-USE_DOCKER=true
 FLAG_CA_NAME="";  FLAG_COUNTRY="";  FLAG_PROVINCE=""; FLAG_CITY=""
 FLAG_ORG="";      FLAG_OU="";       FLAG_KEY_FILE=""; FLAG_KEY_TYPE=""
 FLAG_KEY_PARAM=""; FLAG_ROOT_DAYS=""; FLAG_INT_DAYS=""; FLAG_LEAF_DAYS=""
@@ -88,7 +86,6 @@ while [[ $# -gt 0 ]]; do
         --leaf-days)    FLAG_LEAF_DAYS="$2"; shift 2 ;;
         --digest)       FLAG_DIGEST="$2"; shift 2 ;;
         --outpath)      FLAG_OUTPATH="$2"; shift 2 ;;
-        --no-docker)    USE_DOCKER=false; shift ;;
         help|--help|-h) MODE="help"; shift ;;
         *) err "Unknown argument: $1"; MODE="help"; set -- ;;
     esac
@@ -242,8 +239,7 @@ _show_init_summary() {
     echo    "    Digest:        ${INT_DIGEST}"
     echo ""
     echo -e "  ${BOLD}Output${NC}"
-    echo    "    Directory:     ${OUT_DIR}"
-    $USE_DOCKER && echo "    Docker image:  ${DOCKER_IMAGE}"
+    echo "    Directory:     ${OUT_DIR}"
     echo ""
     echo -e "  ${BOLD}────────────────────────────────────────────────────────────────${NC}"
 }
@@ -255,6 +251,7 @@ _show_init_summary() {
 _determine_key_source() {
     [ -n "$FLAG_KEY_FILE" ] && return            # already supplied via --key
     [ -f "${OUT_DIR}/root_ca.key" ] && return    # existing key on disk
+    [ -f "/key/root_ca.key" ] && FLAG_KEY_FILE="/key/root_ca.key" && return # external volume key
 
     echo ""
     echo -e "  ${BOLD}Root CA Private Key${NC}"
@@ -354,7 +351,6 @@ _show_sign_summary() {
     echo    "    Certificate:   ${_sign_out}/${_cert_name}"
     echo    "    Validity:      ${LEAF_DAYS} days"
     echo    "    Digest:        ${ROOT_DIGEST}"
-    $USE_DOCKER && echo "    Docker image:  ${DOCKER_IMAGE}"
     echo ""
     echo -e "  ${BOLD}────────────────────────────────────────────────────────────────${NC}"
 }
@@ -373,66 +369,10 @@ _recollect_sign() {
     echo ""
 }
 
-# -----------------------------------------------------------------------
-# Docker image management
-# -----------------------------------------------------------------------
-_ensure_docker_image() {
-    command -v docker >/dev/null 2>&1 || {
-        warn "Docker not found — falling back to local openssl (--no-docker implied)"
-        USE_DOCKER=false
-        return
-    }
-    if docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
-        return
-    fi
-    [ -f "$DOCKERFILE" ] || die "Dockerfile not found: ${DOCKERFILE}"
-    info "Building Docker image ${DOCKER_IMAGE} from ${DOCKERFILE}..."
-    docker build -t "$DOCKER_IMAGE" "$SCRIPT_DIR" \
-        || die "Docker build failed. Check: ${DOCKERFILE}"
-    ok "Docker image built: ${DOCKER_IMAGE}"
-}
-
-# -----------------------------------------------------------------------
-# Path translation: host path → container path (when OUT_DIR = /pki/output)
-# -----------------------------------------------------------------------
-_p() {
-    local host_path
-    host_path="$(realpath "$1" 2>/dev/null || echo "$1")"
-    if $USE_DOCKER; then
-        local out_real
-        out_real="$(realpath "${OUT_DIR}")"
-        if [[ "$host_path" == "${out_real}/"* ]]; then
-            echo "/pki/output/${host_path#${out_real}/}"
-        elif [[ "$host_path" == "${out_real}" ]]; then
-            echo "/pki/output"
-        else
-            echo "$host_path"
-        fi
-    else
-        echo "$host_path"
-    fi
-}
-
-# -----------------------------------------------------------------------
-# Run openssl — Docker (OUT_DIR mounted as /pki/output) or local
-# Set _EXTRA_VOLS=("host:container[:opts]" ...) for additional mounts.
-# -----------------------------------------------------------------------
-_EXTRA_VOLS=()
+_p() { echo "$1"; }
 
 _run_openssl() {
-    if $USE_DOCKER; then
-        local vol_args=("-v" "${OUT_DIR}:/pki/output")
-        for v in "${_EXTRA_VOLS[@]+"${_EXTRA_VOLS[@]}"}"; do
-            vol_args+=("-v" "$v")
-        done
-        docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            "${vol_args[@]}" \
-            "$DOCKER_IMAGE" \
-            openssl "$@"
-    else
-        openssl "$@"
-    fi
+    openssl "$@"
 }
 
 # -----------------------------------------------------------------------
@@ -486,8 +426,7 @@ cmd_init() {
         esac
     done
 
-    $USE_DOCKER && _ensure_docker_image
-    ! $USE_DOCKER && { command -v openssl >/dev/null 2>&1 || die "openssl not found in PATH"; }
+    command -v openssl >/dev/null 2>&1 || die "openssl not found in PATH"
 
     mkdir -p "$OUT_DIR"
     chmod 700 "$OUT_DIR"
@@ -712,8 +651,7 @@ cmd_sign_certs() {
 
     echo ""
 
-    $USE_DOCKER && _ensure_docker_image
-    ! $USE_DOCKER && { command -v openssl >/dev/null 2>&1 || die "openssl not found"; }
+    command -v openssl >/dev/null 2>&1 || die "openssl not found"
 
     # Write leaf extensions into ca_dir (Docker-accessible)
     local leaf_ext="${ca_dir}/_leaf_ext.cnf"
@@ -728,65 +666,22 @@ LEAFEOF
 
     info "Signing certificate..."
 
-    if $USE_DOCKER; then
-        local vol_args=()
-        vol_args+=("-v" "${ca_dir}:/pki/ca")
-        vol_args+=("-v" "${sign_out_real}:/pki/output")
+    openssl x509 -req \
+        -in "$csr_abs" \
+        -CA "$root_crt" \
+        -CAkey "$root_key" \
+        -CAcreateserial \
+        -out "$signed_cert" \
+        -days "$LEAF_DAYS" \
+        -"${ROOT_DIGEST}" \
+        -extfile "$leaf_ext" \
+        -extensions leaf \
+        2>/dev/null \
+    || { rm -f "$leaf_ext"; die "Certificate signing failed"; }
 
-        # Mount CSR directory unless it's the same as ca_dir
-        local csr_container_path
-        if [ "$(realpath "$csr_dir")" = "$(realpath "$ca_dir")" ]; then
-            csr_container_path="/pki/ca/${csr_file}"
-        else
-            vol_args+=("-v" "${csr_dir}:/pki/input:ro")
-            csr_container_path="/pki/input/${csr_file}"
-        fi
-
-        docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            "${vol_args[@]}" \
-            "$DOCKER_IMAGE" \
-            openssl x509 -req \
-                -in "$csr_container_path" \
-                -CA /pki/ca/root_ca.crt \
-                -CAkey /pki/ca/root_ca.key \
-                -CAcreateserial \
-                -out "/pki/output/${cert_name}" \
-                -days "$LEAF_DAYS" \
-                -"${ROOT_DIGEST}" \
-                -extfile /pki/ca/_leaf_ext.cnf \
-                -extensions leaf \
-                2>/dev/null \
-        || { rm -f "$leaf_ext"; die "Certificate signing failed"; }
-
-        docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "${ca_dir}:/pki/ca:ro" \
-            -v "${sign_out_real}:/pki/output:ro" \
-            "$DOCKER_IMAGE" \
-            openssl verify \
-                -CAfile /pki/ca/root_ca.crt \
-                "/pki/output/${cert_name}" >/dev/null 2>&1 \
+    openssl verify -CAfile "$root_crt" "$signed_cert" >/dev/null 2>&1 \
         && ok "Certificate verified against root CA" \
         || warn "Verification step failed — inspect manually"
-    else
-        openssl x509 -req \
-            -in "$csr_abs" \
-            -CA "$root_crt" \
-            -CAkey "$root_key" \
-            -CAcreateserial \
-            -out "$signed_cert" \
-            -days "$LEAF_DAYS" \
-            -"${ROOT_DIGEST}" \
-            -extfile "$leaf_ext" \
-            -extensions leaf \
-            2>/dev/null \
-        || { rm -f "$leaf_ext"; die "Certificate signing failed"; }
-
-        openssl verify -CAfile "$root_crt" "$signed_cert" >/dev/null 2>&1 \
-            && ok "Certificate verified against root CA" \
-            || warn "Verification step failed — inspect manually"
-    fi
 
     rm -f "$leaf_ext"
     ok "Signed certificate: ${signed_cert}"
@@ -804,26 +699,14 @@ cmd_verify() {
     [ -f "$root_crt" ] || die "root_ca.crt not found in ${ca_dir}. Run: ./root-ca.sh init"
     [ -f "$int_crt"  ] || die "intermediate_ca.crt not found in ${ca_dir}. Run: ./root-ca.sh init"
 
-    $USE_DOCKER && _ensure_docker_image
-
     echo ""
     info "Verifying: ${int_crt}"
     info "   Against: ${root_crt}"
     echo ""
 
-    if $USE_DOCKER; then
-        docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "${ca_dir}:/pki/ca:ro" \
-            "$DOCKER_IMAGE" \
-            openssl verify -CAfile /pki/ca/root_ca.crt /pki/ca/intermediate_ca.crt \
-        && ok "Chain OK" \
-        || { err "Chain verification FAILED"; exit 1; }
-    else
-        openssl verify -CAfile "$root_crt" "$int_crt" \
-        && ok "Chain OK" \
-        || { err "Chain verification FAILED"; exit 1; }
-    fi
+    openssl verify -CAfile "$root_crt" "$int_crt" \
+    && ok "Chain OK" \
+    || { err "Chain verification FAILED"; exit 1; }
     echo ""
 }
 
@@ -838,17 +721,8 @@ cmd_show() {
         local cert="${ca_dir}/${f}"
         if [ -f "$cert" ]; then
             echo -e "${BOLD}=== ${f} ===${NC}"
-            if $USE_DOCKER; then
-                docker run --rm \
-                    --user "$(id -u):$(id -g)" \
-                    -v "${ca_dir}:/pki/ca:ro" \
-                    "$DOCKER_IMAGE" \
-                    openssl x509 -in "/pki/ca/${f}" -noout -text 2>/dev/null \
-                    | grep -E "$grep_pat"
-            else
-                openssl x509 -in "$cert" -noout -text 2>/dev/null \
-                    | grep -E "$grep_pat"
-            fi
+            openssl x509 -in "$cert" -noout -text 2>/dev/null \
+                | grep -E "$grep_pat"
             echo ""
         else
             warn "${f} not found in ${ca_dir}"

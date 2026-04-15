@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  ca:
+    build: .
+    image: private-root-ca:latest
+    container_name: private-root-ca
+    command: sleep infinity
+    volumes:
+      # Map the host output directory to the container
+      - ./output:/ca/output
+      
+      # Optional: Map a specific root key in if it already exists
+      # - ./root_ca.key:/key/root_ca.key:ro
+      
+      # Optional: Override the default pki-vars.yaml
+      # - ./pki-vars.yaml:/ca/pki-vars.yaml:ro
+    
+    # Optional: Run as a specific UID/GID so files generated on the host 
+    # belong to your user rather than root.
+    # user: "1000:1000"
