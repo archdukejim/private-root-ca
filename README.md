@@ -2,99 +2,73 @@
 
 > Offline, standalone Public Key Infrastructure (PKI) management for home labs inside a FIPS-compliant, self-contained Docker ecosystem.
 
-This repository provides scripts packaged within a Red Hat UBI minimal container to initialize a self-contained Root CA, sign intermediate CAs, and generate/sign standalone offline leaf certificates. 
+This repository provides modular scripts packaged within a Red Hat UBI minimal container to initialize a self-contained Root CA, sign intermediate CAs, batch process your own custom intermediate keys, and generate leaf certificates securely. 
 
-The container enforces FIPS-compliant algorithms (via `openssl`) and strictly contains all execution within the Docker environment, interacting with the host exclusively via volume mounts.
-
-It is built for multi-arch execution (e.g., AMD64 and ARM64/Raspberry Pi) leveraging the official multi-architecture `ubi-minimal` base images.
-
----
+This environment natively enforces industry best practices (e.g. default 10+ year CA lifespans natively inherited through defaults) while allowing explicitly defined logic to override all metrics via `.json` configs.
 
 ## Architecture & Configuration
 
-All execution happens exclusively in the container. The scripts (`root-ca` and `gen-csr`) evaluate operations in the container's `/ca/output/` directory, which routes to a volume on the host. An optional explicit root key can be mounted at `/key/root_ca.key`.
+The container operates dynamically by scanning explicitly mapped volume mounts.
+- `/ca/output`: Main output directory.
+- `/ca/int-keys`: Explicit volume for dropping in your own `.key` files to batch sign.
+- `/root.key`: Optional explicit mount for your Root CA key.
 
-### Running the Container
+### `pki-config.json`
 
-The container provides two modes of operation: **Long-Running/Background** and **Transient**.
+You can optionally mount an explicit configuration file to `/ca/pki-config.json` to alter certificate generation dynamically. This inherently solves "complex functions", for example, setting time limits individually per key:
 
-#### Option 1: Long-Running (docker-compose)
+```json
+{
+  "root": {
+    "ca_name": "Acme Global CA",
+    "days": 7300,
+    "country": "US"
+  },
+  "intermediates": {
+    "prod_inter": {
+      "ca_name": "Acme Production Intermediate CA",
+      "days": 365
+    },
+    "dev_inter": {
+      "ca_name": "Acme Development Sandbox CA",
+      "days": 30
+    }
+  },
+  "leaf": {
+    "days": 180,
+    "inter": "prod_inter"
+  }
+}
+```
 
-This mounts your directories and starts a sleeping container in the background.
+## Usage
 
+Start the container securely in the background:
 ```bash
 docker-compose up -d
 ```
 
-You can then run commands inside the container whenever you need to mint certificates:
-
+### 1. Initialize the Root CA
+Generate or mount your root and initiate self-signing.
 ```bash
-# As standard root in container
-docker exec -it private-root-ca root-ca init
-
-# As a specific host user (so the generated files sync host permissions perfectly)
-docker exec -it --user "1000:1000" private-root-ca root-ca init
+docker exec -it private-root-ca pki-init-root
 ```
 
-#### Option 2: Transient Execution (docker run)
+### 2. Intermediate CAs (Batch "Bring Your Own Key")
+Drop your `.key` files (e.g., `prod_inter.key`, `dev_inter.key`) into your mounted `./int-keys` directory.
 
-Spin up the container instantly, run one command, and tear down:
+Run the batch processing tool:
+```bash
+docker exec -it private-root-ca pki-batch
+```
+The logic iterates your folder. It deduplicates and skips any keys that already have generated certificates, while referencing `pki-config.json` for specific individual key execution overrides (like the exact days and CNs established for `prod_inter` against `dev_inter` above in the custom fields). 
+
+*Note: You can also generate ad-hoc/new intermediates directly using `docker exec -it private-root-ca pki-inter --name my_new_int` without needing an input key first.*
+
+### 3. Generate Standalone Leaf Certificates
+Generate local leaves interactively or purely through arguments seamlessly.
 
 ```bash
-docker run --rm -it \
-  --user "$(id -u):$(id -g)" \
-  -v "$(pwd)/output:/ca/output" \
-  private-root-ca:latest root-ca init
+docker exec -it private-root-ca pki-leaf --cn myservice.home --san "DNS:myservice.home"
 ```
-
----
-
-## 1. Initialize the PKI
-
-The root CA and intermediate CA must be generated **offline**. Utilizing either the transient or background execution above:
-
-```bash
-# Using an existing compose setup
-docker exec -it private-root-ca root-ca init
-```
-
-Identity fields are read from `pki-vars.yaml` inside the container (`/ca/pki-vars.yaml` if mounted, or `/etc/pki/pki-vars.yaml` by default). Any missing fields are collected interactively. The intermediate CA key type, key param, and digest are **always prompted**.
-
-This writes four files to the `/ca/output/` volume (which appears on your host):
-
-| File | Purpose |
-|------|---------|
-| `root_ca.key` | Root CA private key — **keep offline or destroy** |
-| `root_ca.crt` | Root CA certificate (trust anchor) |
-| `intermediate_ca.key` | Intermediate CA private key |
-| `intermediate_ca.crt` | Intermediate CA certificate |
-
-**Key generation options:**
-
-```bash
-docker exec -it private-root-ca root-ca init --key-type ec --key-param P-384
-```
-
-*Note: If you have an external root key you want to supply, mount it to `/key/root_ca.key` and it will securely adopt it.*
-
-After `init`, verify the chain:
-
-```bash
-docker exec -it private-root-ca root-ca verify
-```
-
----
-
-## 2. Generate Standalone Leaf Certificates
-
-While the `intermediate_ca` is typically supplied to an automated provisioner (like Step-CA), you can manually generate and sign standalone certificates using `gen-csr`.
-
-```bash
-# 1. Generate a leaf key + CSR
-docker exec -it private-root-ca gen-csr --cn myservice.home --san "DNS:myservice.home,IP:10.0.1.5"
-
-# 2. Sign the CSR with the root CA
-docker exec -it private-root-ca root-ca --sign-certs /ca/output/myservice.home.csr
-```
-
-*Certs and keys are output directly to `/ca/output/` on the container, syncing instantly to your host volume mount without altering file permissions recursively across the whole system, securely preserving ownership to the running `--user`.*
+*Note: A `PKI_PROD_MODE=true` docker environmental variable natively enforces robust constraints, explicitly denying testing or arbitrary leaf generation without concrete identifiers.*

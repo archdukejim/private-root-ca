@@ -6,16 +6,22 @@ services:
     image: private-root-ca:latest
     container_name: private-root-ca
     command: sleep infinity
+    environment:
+      # Set to 'true' to strictly enforce CN requirements and block generic test certs
+      - PKI_PROD_MODE=false
     volumes:
-      # Map the host output directory to the container
+      # Main output directory for keys and certs
       - ./output:/ca/output
       
-      # Optional: Map a specific root key in if it already exists
-      # - ./root_ca.key:/key/root_ca.key:ro
+      # Batch Processing: Bring Your Own Intermediate Keys
+      - ./int-keys:/ca/int-keys:ro
       
-      # Optional: Override the default pki-vars.yaml
-      # - ./pki-vars.yaml:/ca/pki-vars.yaml:ro
+      # Root Key Processing: Optional explicit root key
+      # - ./root_ca.key:/root.key:ro
+      
+      # Optional: Override all default cert intervals config
+      # - ./pki-config.json:/ca/pki-config.json:ro
     
-    # Optional: Run as a specific UID/GID so files generated on the host 
-    # belong to your user rather than root.
+    # Run as a specific UID/GID so files generated on the host 
+    # belong to your user naturally.
     # user: "1000:1000"
