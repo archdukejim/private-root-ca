@@ -69,6 +69,6 @@ The logic iterates your folder. It deduplicates and skips any keys that already 
 Generate local leaves interactively or purely through arguments seamlessly.
 
 ```bash
-docker exec -it private-root-ca pki-leaf --cn myservice.home --san "DNS:myservice.home"
+docker run -it --rm -v $(pwd)/output:/ca/output private-root-ca:latest pki-leaf --cn myservice.home --san "DNS:myservice.home"
 ```
 *Note: A `PKI_PROD_MODE=true` docker environmental variable natively enforces robust constraints, explicitly denying testing or arbitrary leaf generation without concrete identifiers.*

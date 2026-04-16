@@ -52,7 +52,7 @@ fi
 
 CN="$(_prompt "$FLAG_CN" "Common Name (e.g. myservice.home)" "test.home")"
 SAN="$(_prompt "$FLAG_SAN" "SANs (DNS:...,IP:...) [Optional]" "")"
-INTER_NAME="${FLAG_INTER:-$(_cfg leaf.inter "intermediate_ca")}"
+INTER_NAME="${FLAG_INTER:-$(_cfg leaf.inter "ica")}"
 DAYS="${FLAG_DAYS:-$(_cfg leaf.days "$DEF_LEAF_DAYS")}"
 
 if [ "$SKIP_DEFAULTS" = "true" ]; then
@@ -84,6 +84,11 @@ leaf_crt="${OUT_DIR}/${CN_SAFE}.crt"
 int_key="${OUT_DIR}/${INTER_NAME}.key"
 int_crt="${OUT_DIR}/${INTER_NAME}.crt"
 
+if [ "$INTER_NAME" = "ica" ] && [ ! -f "$int_crt" ] && [ ! -f "$int_key" ]; then
+    info "Default intermediate 'ica' not found. Automatically generating..."
+    /usr/local/bin/pki-inter --name ica --ca-name "Generic Intermediate CA" || die "Failed to generate default intermediate."
+fi
+
 [ -f "$int_crt" ] || die "Intermediate CA Cert missing: ${int_crt}"
 [ -f "$int_key" ] || die "Intermediate CA Key missing: ${int_key}"
 
@@ -107,7 +112,7 @@ cat > "$local_cnf" <<CNFEOF
 [req]
 prompt = no
 distinguished_name = dn
-req_extensions = leaf_ext
+req_extensions = v3_req
 
 [dn]
 CN = ${CN}
@@ -122,6 +127,16 @@ CNFEOF
 
 cat >> "$local_cnf" <<CNFEOF
 
+[v3_req]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth,clientAuth
+subjectKeyIdentifier=hash
+CNFEOF
+[ -n "$SAN" ] && echo "subjectAltName = ${SAN}" >> "$local_cnf"
+
+cat >> "$local_cnf" <<CNFEOF
+
 [leaf_ext]
 basicConstraints = critical,CA:FALSE
 keyUsage = critical,digitalSignature,keyEncipherment
@@ -129,10 +144,7 @@ extendedKeyUsage = serverAuth,clientAuth
 subjectKeyIdentifier=hash
 authorityKeyIdentifier=keyid:always
 CNFEOF
-
-if [ -n "$SAN" ]; then
-    echo "subjectAltName = ${SAN}" >> "$local_cnf"
-fi
+[ -n "$SAN" ] && echo "subjectAltName = ${SAN}" >> "$local_cnf"
 
 info "Generating CSR..."
 openssl req -new -key "$leaf_key" -out "$leaf_csr" -"${DIGEST}" -config "$local_cnf" 2>/dev/null

@@ -45,11 +45,17 @@ done
 echo ""
 echo -e "  ${BOLD}PKI — Intermediate CA ($NAME)${NC}"
 
-NAME="$(_prompt "$NAME" "Intermediate CA File Prefix (e.g., prod_inter)" "intermediate_ca")"
+NAME="$(_prompt "$NAME" "Intermediate CA File Prefix (e.g., prod_inter)" "ica")"
 
 root_crt="${OUT_DIR}/root_ca.crt"
 root_key="/root.key"
 [ -f "$root_key" ] || root_key="${OUT_DIR}/root_ca.key"
+
+if [ ! -f "$root_crt" ] || [ ! -f "$root_key" ]; then
+    info "Root CA missing. Automatically generating..."
+    /usr/local/bin/pki-init-root --ca-name "Generic Root CA" || die "Failed to generate Root CA."
+    root_key="${OUT_DIR}/root_ca.key"
+fi
 
 [ -f "$root_crt" ] || die "Root CA missing: ${root_crt}"
 [ -f "$root_key" ] || die "Root Key missing: ${root_key}"
