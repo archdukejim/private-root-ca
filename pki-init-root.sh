@@ -4,32 +4,38 @@
 source /usr/local/bin/pki-core
 
 FLAG_CA_NAME=""
-FLAG_COUNTRY=""
-FLAG_PROVINCE=""
-FLAG_CITY=""
-FLAG_ORG=""
-FLAG_OU=""
 FLAG_KEY_TYPE=""
 FLAG_KEY_PARAM=""
 FLAG_DAYS=""
 FLAG_DIGEST=""
 
+FLAG_C=""
+FLAG_ST=""
+FLAG_L=""
+FLAG_O=""
+FLAG_OU=""
+FLAG_EMAIL=""
+SKIP_DEFAULTS="false"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --ca-name)   FLAG_CA_NAME="$2"; shift 2 ;;
-        --country)   FLAG_COUNTRY="$2"; shift 2 ;;
-        --province)  FLAG_PROVINCE="$2"; shift 2 ;;
-        --city)      FLAG_CITY="$2"; shift 2 ;;
-        --org)       FLAG_ORG="$2"; shift 2 ;;
-        --ou)        FLAG_OU="$2"; shift 2 ;;
         --key-type)  FLAG_KEY_TYPE="$2"; shift 2 ;;
         --key-param) FLAG_KEY_PARAM="$2"; shift 2 ;;
         --days)      FLAG_DAYS="$2"; shift 2 ;;
         --digest)    FLAG_DIGEST="$2"; shift 2 ;;
+        --country)   FLAG_C="$2"; shift 2 ;;
+        --state)     FLAG_ST="$2"; shift 2 ;;
+        --locality)  FLAG_L="$2"; shift 2 ;;
+        --org)       FLAG_O="$2"; shift 2 ;;
+        --ou)        FLAG_OU="$2"; shift 2 ;;
+        --email)     FLAG_EMAIL="$2"; shift 2 ;;
+        --no-defaults) SKIP_DEFAULTS="true"; shift 1 ;;
         --help|-h)
             echo "Usage: pki-init-root [options]"
             echo "  --ca-name <name>    Common Name (e.g., Acme Root CA)"
             echo "  --days <n>          Validity in days (default: $DEF_ROOT_DAYS)"
+            echo "  --no-defaults       Leaves fields blank unless explicitly passed"
             exit 0
             ;;
         *) die "Unknown argument: $1" ;;
@@ -40,13 +46,23 @@ echo ""
 echo -e "  ${BOLD}PKI Initialization — Root CA${NC}"
 echo ""
 
-# Load defaults from config or hardcoded defaults
 CA_NAME="$(_prompt "${FLAG_CA_NAME:-$(_cfg root.ca_name)}" "CA Name" "Root Certificate Authority")"
-CERT_COUNTRY="$(_prompt "${FLAG_COUNTRY:-$(_cfg root.country)}" "Country (2-letter code)" "US")"
-CERT_PROVINCE="$(_prompt "${FLAG_PROVINCE:-$(_cfg root.province)}" "State / Province" "DC")"
-CERT_CITY="$(_prompt "${FLAG_CITY:-$(_cfg root.city)}" "City / Locality" "Washington")"
-CERT_ORG="$(_prompt "${FLAG_ORG:-$(_cfg root.org)}" "Organization" "Internal")"
-CERT_OU="$(_prompt "${FLAG_OU:-$(_cfg root.ou)}" "Organizational Unit" "Private")"
+
+if [ "$SKIP_DEFAULTS" = "true" ]; then
+    C="${FLAG_C}"
+    ST="${FLAG_ST}"
+    L="${FLAG_L}"
+    O="${FLAG_O}"
+    OU="${FLAG_OU}"
+    EMAIL="${FLAG_EMAIL}"
+else
+    C="${FLAG_C:-$(_cfg root.country "$DEF_C")}"
+    ST="${FLAG_ST:-$(_cfg root.state "$DEF_ST")}"
+    L="${FLAG_L:-$(_cfg root.locality "$DEF_L")}"
+    O="${FLAG_O:-$(_cfg root.org "$DEF_O")}"
+    OU="${FLAG_OU:-$(_cfg root.ou "$DEF_OU")}"
+    EMAIL="${FLAG_EMAIL:-$(_cfg root.email "$DEF_EMAIL")}"
+fi
 
 KEY_TYPE="${FLAG_KEY_TYPE:-$(_cfg root.key_type "$DEF_KEY_TYPE")}"
 KEY_PARAM="${FLAG_KEY_PARAM:-$(_cfg root.key_param "$DEF_ROOT_KEY_PARAM")}"
@@ -59,7 +75,6 @@ chmod 700 "$OUT_DIR"
 root_key="${OUT_DIR}/root_ca.key"
 root_crt="${OUT_DIR}/root_ca.crt"
 
-# Check for custom mounted key
 if [ -f "/root.key" ]; then
     info "Adopting explicit mounted Root CA key at /root.key"
     root_key="/root.key"
@@ -81,17 +96,43 @@ if [ -f "$root_crt" ]; then
     ok "Root CA certificate already exists (${root_crt}) — skipping generation."
 else
     info "Self-signing Root CA certificate (${DAYS} days)..."
-    root_subj="/C=${CERT_COUNTRY}/ST=${CERT_PROVINCE}/L=${CERT_CITY}/O=${CERT_ORG}/OU=${CERT_OU}/CN=${CA_NAME}"
+
+    local_cnf="${OUT_DIR}/_cnf_root.cnf"
+    cat > "$local_cnf" <<CNFEOF
+[req]
+prompt = no
+distinguished_name = dn
+req_extensions = ext
+x509_extensions = ext
+
+[dn]
+CN = ${CA_NAME}
+CNFEOF
+
+    [ -n "$C" ] && echo "C = ${C}" >> "$local_cnf"
+    [ -n "$ST" ] && echo "ST = ${ST}" >> "$local_cnf"
+    [ -n "$L" ] && echo "L = ${L}" >> "$local_cnf"
+    [ -n "$O" ] && echo "O = ${O}" >> "$local_cnf"
+    [ -n "$OU" ] && echo "OU = ${OU}" >> "$local_cnf"
+    [ -n "$EMAIL" ] && echo "emailAddress = ${EMAIL}" >> "$local_cnf"
+
+    cat >> "$local_cnf" <<CNFEOF
+
+[ext]
+basicConstraints=critical,CA:TRUE
+subjectKeyIdentifier=hash
+keyUsage=critical,keyCertSign,cRLSign
+CNFEOF
+
     openssl req -new -x509 \
         -key "$root_key" \
         -out "$root_crt" \
         -days "$DAYS" \
         -"${DIGEST}" \
-        -subj "$root_subj" \
-        -addext "basicConstraints=critical,CA:TRUE" \
-        -addext "subjectKeyIdentifier=hash" \
-        -addext "keyUsage=critical,keyCertSign,cRLSign" \
+        -config "$local_cnf" \
         2>/dev/null
+    
+    rm -f "$local_cnf"
     chmod 644 "$root_crt"
     ok "Root CA certificate generated: ${root_crt}"
 fi

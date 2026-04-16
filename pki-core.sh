@@ -14,7 +14,15 @@ INT_KEYS_DIR="/ca/int-keys"
 # without providing adequate parameters.
 PKI_PROD_MODE="${PKI_PROD_MODE:-false}"
 
-# Defaults according to best practices
+# Subject Options Default Environment Constants
+DEF_C="${DEF_CERT_COUNTRY:-US}"
+DEF_ST="${DEF_CERT_STATE:-Somewhere}"
+DEF_L="${DEF_CERT_LOCALITY:-Someplace}"
+DEF_O="${DEF_CERT_ORG:-Acme Inc}"
+DEF_OU="${DEF_CERT_OU:-IT}"
+DEF_EMAIL="${DEF_CERT_EMAIL:-}"
+
+# Crypto Options Minimum Defaults
 DEF_KEY_TYPE="rsa"
 DEF_ROOT_KEY_PARAM="4096"
 DEF_INT_KEY_PARAM="4096"
@@ -40,7 +48,6 @@ die()   { err "$*"; exit 1; }
 # -----------------------------------------------------------------------
 # JSON Parsing (Python3 assumed present via UBI Minimal)
 # -----------------------------------------------------------------------
-# Usage: _read_json "file.json" "global.cert_param" "default_val"
 _read_json() {
     local file="$1" keypath="$2" default="${3:-}"
     [ -f "$file" ] || { echo "$default"; return; }
@@ -50,12 +57,11 @@ try:
     with open(sys.argv[1]) as f: data = json.load(f)
     keys = sys.argv[2].split(".")
     for k in keys: data = data[k]
-    print(data if data is not None else sys.argv[3])
+    print(data if data is not None and str(data).strip() != "" else sys.argv[3])
 except Exception: print(sys.argv[3])
 ' "$file" "$keypath" "$default"
 }
 
-# Reads dot-path from /ca/pki-config.json
 _cfg() {
     local keypath="$1" default="${2:-}"
     _read_json "$CONFIG_FILE" "$keypath" "$default"

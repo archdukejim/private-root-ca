@@ -9,6 +9,14 @@ FLAG_DAYS=""
 FLAG_INTER=""
 FLAG_KEY_TYPE=""
 
+FLAG_C=""
+FLAG_ST=""
+FLAG_L=""
+FLAG_O=""
+FLAG_OU=""
+FLAG_EMAIL=""
+SKIP_DEFAULTS="false"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --cn)        FLAG_CN="$2"; shift 2 ;;
@@ -16,11 +24,19 @@ while [[ $# -gt 0 ]]; do
         --days)      FLAG_DAYS="$2"; shift 2 ;;
         --inter)     FLAG_INTER="$2"; shift 2 ;;
         --key-type)  FLAG_KEY_TYPE="$2"; shift 2 ;;
+        --country)   FLAG_C="$2"; shift 2 ;;
+        --state)     FLAG_ST="$2"; shift 2 ;;
+        --locality)  FLAG_L="$2"; shift 2 ;;
+        --org)       FLAG_O="$2"; shift 2 ;;
+        --ou)        FLAG_OU="$2"; shift 2 ;;
+        --email)     FLAG_EMAIL="$2"; shift 2 ;;
+        --no-defaults) SKIP_DEFAULTS="true"; shift 1 ;;
         --help|-h)
             echo "Usage: pki-leaf --cn <domain> [options]"
             echo "  --san <san>       Subject Alternative Names"
             echo "  --days <n>        Validity period"
-            echo "  --inter <name>    Intermediate CA to sign with (default: intermediate_ca)"
+            echo "  --inter <name>    Intermediate CA to sign with"
+            echo "  --no-defaults     Leaves fields blank unless explicitly passed"
             exit 0
             ;;
         *) die "Unknown argument: $1" ;;
@@ -36,8 +52,25 @@ fi
 
 CN="$(_prompt "$FLAG_CN" "Common Name (e.g. myservice.home)" "test.home")"
 SAN="$(_prompt "$FLAG_SAN" "SANs (DNS:...,IP:...) [Optional]" "")"
-INTER_NAME="${FLAG_INTER:-$(_cfg default_inter "intermediate_ca")}"
+INTER_NAME="${FLAG_INTER:-$(_cfg leaf.inter "intermediate_ca")}"
 DAYS="${FLAG_DAYS:-$(_cfg leaf.days "$DEF_LEAF_DAYS")}"
+
+if [ "$SKIP_DEFAULTS" = "true" ]; then
+    C="${FLAG_C}"
+    ST="${FLAG_ST}"
+    L="${FLAG_L}"
+    O="${FLAG_O}"
+    OU="${FLAG_OU}"
+    EMAIL="${FLAG_EMAIL}"
+else
+    C="${FLAG_C:-$(_cfg leaf.country "$DEF_C")}"
+    ST="${FLAG_ST:-$(_cfg leaf.state "$DEF_ST")}"
+    L="${FLAG_L:-$(_cfg leaf.locality "$DEF_L")}"
+    O="${FLAG_O:-$(_cfg leaf.org "$DEF_O")}"
+    OU="${FLAG_OU:-$(_cfg leaf.ou "$DEF_OU")}"
+    EMAIL="${FLAG_EMAIL:-$(_cfg leaf.email "$DEF_EMAIL")}"
+fi
+
 KEY_TYPE="${FLAG_KEY_TYPE:-$(_cfg leaf.key_type "$DEF_KEY_TYPE")}"
 KEY_PARAM="$(_cfg leaf.key_param "$DEF_LEAF_KEY_PARAM")"
 DIGEST="$(_cfg leaf.digest "$DEF_DIGEST")"
@@ -69,7 +102,7 @@ if [ ! -f "$leaf_key" ]; then
     chmod 600 "$leaf_key"
 fi
 
-local_cnf="${OUT_DIR}/_csr_${CN_SAFE}.cnf"
+local_cnf="${OUT_DIR}/_csr_leaf_${CN_SAFE}.cnf"
 cat > "$local_cnf" <<CNFEOF
 [req]
 prompt = no
@@ -78,6 +111,16 @@ req_extensions = leaf_ext
 
 [dn]
 CN = ${CN}
+CNFEOF
+
+[ -n "$C" ] && echo "C = ${C}" >> "$local_cnf"
+[ -n "$ST" ] && echo "ST = ${ST}" >> "$local_cnf"
+[ -n "$L" ] && echo "L = ${L}" >> "$local_cnf"
+[ -n "$O" ] && echo "O = ${O}" >> "$local_cnf"
+[ -n "$OU" ] && echo "OU = ${OU}" >> "$local_cnf"
+[ -n "$EMAIL" ] && echo "emailAddress = ${EMAIL}" >> "$local_cnf"
+
+cat >> "$local_cnf" <<CNFEOF
 
 [leaf_ext]
 basicConstraints = critical,CA:FALSE

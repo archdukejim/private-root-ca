@@ -17,7 +17,7 @@ services:
       - ./int-keys:/ca/int-keys:ro
       
       # Root Key Processing: Optional explicit root key
-      # - ./root_ca.key:/root.key:ro
+      - ./host_root.key:/root.key:ro
       
       # Optional: Override all default cert intervals config
       # - ./pki-config.json:/ca/pki-config.json:ro
